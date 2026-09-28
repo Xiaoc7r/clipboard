@@ -1,0 +1,4 @@
+dist/
+*.user
+*.suo
+.vs/
