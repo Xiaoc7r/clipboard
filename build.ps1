@@ -6,6 +6,6 @@ if (-not (Test-Path -LiteralPath $compiler)) {
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
-& $compiler /nologo /target:winexe /platform:anycpu /optimize+ /win32manifest:"$root\app.manifest" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Windows.Forms.dll /out:"$dist\PicoPaste.exe" "$root\src\Program.cs"
+& $compiler /nologo /target:winexe /platform:anycpu32bitpreferred /optimize+ /win32manifest:"$root\app.manifest" /reference:System.dll /reference:System.Core.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Windows.Forms.dll /out:"$dist\PicoPaste.exe" "$root\src\Program.cs"
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 Write-Host "Build complete: $dist\PicoPaste.exe"

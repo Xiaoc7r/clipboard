@@ -73,6 +73,9 @@ namespace PicoPaste
     [DataContract]
     internal sealed class UserPreferences
     {
+        [DataMember(Name = "settingsVersion")]
+        public int SettingsVersion { get; set; }
+
         [DataMember(Name = "dockSide")]
         public string DockSide { get; set; }
 
@@ -88,15 +91,20 @@ namespace PicoPaste
         [DataMember(Name = "alwaysOnTop")]
         public bool AlwaysOnTop { get; set; }
 
+        [DataMember(Name = "performanceMode")]
+        public bool PerformanceMode { get; set; }
+
         public static UserPreferences CreateDefault()
         {
             return new UserPreferences
             {
+                SettingsVersion = 2,
                 DockSide = "Right",
                 TopRatio = 0.5,
-                Translucent = true,
+                Translucent = false,
                 Pinned = false,
-                AlwaysOnTop = true
+                AlwaysOnTop = true,
+                PerformanceMode = true
             };
         }
     }
@@ -135,10 +143,19 @@ namespace PicoPaste
         {
             UserPreferences preferences = ReadJson<UserPreferences>(SettingsFile);
             if (preferences == null) return UserPreferences.CreateDefault();
+            bool migrated = false;
+            if (preferences.SettingsVersion < 2)
+            {
+                preferences.SettingsVersion = 2;
+                preferences.PerformanceMode = true;
+                preferences.Translucent = false;
+                migrated = true;
+            }
             if (preferences.DockSide != "Left" && preferences.DockSide != "Right")
                 preferences.DockSide = "Right";
             if (preferences.TopRatio < 0 || preferences.TopRatio > 1)
                 preferences.TopRatio = 0.5;
+            if (migrated) SavePreferences(preferences);
             return preferences;
         }
 
@@ -194,7 +211,8 @@ namespace PicoPaste
         private const int VisibleHandle = 8;
         private const int VisibleCards = 4;
         private const int MaxHistory = 40;
-        private const int MaxTextLength = 1000000;
+        private const int MaxTextLength = 131072;
+        private const int MaxHistoryCharacters = 524288;
         private const int SnapDistance = 58;
         private const int WmClipboardUpdate = 0x031D;
         private const int WmHotkey = 0x0312;
@@ -207,9 +225,10 @@ namespace PicoPaste
         private readonly List<ClipEntry> _entries;
         private readonly UserPreferences _preferences;
         private readonly Rectangle[] _cardBounds = new Rectangle[VisibleCards];
-        private readonly Timer _hoverTimer;
+        private readonly Timer _autoHideTimer;
         private readonly Timer _animationTimer;
         private readonly Timer _feedbackTimer;
+        private readonly Timer _saveTimer;
         private readonly NotifyIcon _trayIcon;
         private readonly ContextMenuStrip _trayMenu;
         private readonly ContextMenuStrip _entryMenu;
@@ -217,6 +236,7 @@ namespace PicoPaste
         private ToolStripMenuItem _pinMenuItem;
         private ToolStripMenuItem _translucentMenuItem;
         private ToolStripMenuItem _topmostMenuItem;
+        private ToolStripMenuItem _performanceMenuItem;
         private RegisteredWaitHandle _showEventRegistration;
 
         private Rectangle _pinBounds;
@@ -238,7 +258,6 @@ namespace PicoPaste
         private int _hoveredCard = -1;
         private int _pressedCard = -1;
         private int _pageOffset;
-        private int _outsideTicks;
         private int _animationFrom;
         private int _animationTo;
         private DateTime _animationStarted;
@@ -248,6 +267,7 @@ namespace PicoPaste
         private bool _exiting;
         private bool _clipboardListenerAttached;
         private bool _hotkeyAttached;
+        private bool _historyDirty;
         private Point _dragOffset;
         private float _scale = 1f;
         private uint _dpi = 96;
@@ -267,7 +287,8 @@ namespace PicoPaste
             _previewMode = previewMode;
             _preferences = previewMode ? UserPreferences.CreateDefault() : LocalStore.LoadPreferences();
             _entries = previewMode ? CreatePreviewEntries() : LocalStore.LoadHistory();
-            if (_entries.Count > MaxHistory) _entries.RemoveRange(MaxHistory, _entries.Count - MaxHistory);
+            bool historyTrimmed = TrimHistoryToLimits();
+            if (historyTrimmed && !previewMode) LocalStore.SaveHistory(_entries);
             _dockEdge = ParseDockEdge(_preferences.DockSide);
             _statusColor = Color.FromArgb(126, 119, 108);
 
@@ -282,9 +303,13 @@ namespace PicoPaste
             KeyPreview = true;
             Text = "PicoPaste";
 
-            _hoverTimer = new Timer();
-            _hoverTimer.Interval = 80;
-            _hoverTimer.Tick += HoverTimerTick;
+            _autoHideTimer = new Timer();
+            _autoHideTimer.Interval = 560;
+            _autoHideTimer.Tick += delegate
+            {
+                _autoHideTimer.Stop();
+                TryAutoHide();
+            };
 
             _animationTimer = new Timer();
             _animationTimer.Interval = 15;
@@ -301,6 +326,14 @@ namespace PicoPaste
                 Invalidate();
             };
 
+            _saveTimer = new Timer();
+            _saveTimer.Interval = 400;
+            _saveTimer.Tick += delegate
+            {
+                _saveTimer.Stop();
+                FlushHistorySave();
+            };
+
             if (!previewMode)
             {
                 _trayMenu = BuildTrayMenu();
@@ -314,12 +347,18 @@ namespace PicoPaste
             }
 
             MouseMove += HandleMouseMove;
+            MouseEnter += delegate
+            {
+                CancelAutoHide();
+                if (!_expanded) ExpandOnCursorScreen(false);
+            };
             MouseDown += HandleMouseDown;
             MouseUp += HandleMouseUp;
             MouseWheel += HandleMouseWheel;
             MouseLeave += delegate
             {
                 if (!_dragging) { _hoveredCard = -1; Invalidate(); }
+                BeginAutoHide();
             };
             KeyDown += HandleKeyDown;
             SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
@@ -332,10 +371,8 @@ namespace PicoPaste
             get
             {
                 const int WsExToolWindow = 0x00000080;
-                const int CsDropShadow = 0x00020000;
                 CreateParams cp = base.CreateParams;
                 cp.ExStyle |= WsExToolWindow;
-                cp.ClassStyle |= CsDropShadow;
                 return cp;
             }
         }
@@ -400,7 +437,6 @@ namespace PicoPaste
             PlaceAtSavedPosition(false);
             UpdateOpacity();
             UpdateWindowRegion();
-            _hoverTimer.Start();
             RefreshMenuChecks();
 
             if (_showEvent != null)
@@ -725,6 +761,10 @@ namespace PicoPaste
             _pinMenuItem.Click += delegate { TogglePinned(); };
             menu.Items.Add(_pinMenuItem);
 
+            _performanceMenuItem = new ToolStripMenuItem("极简性能模式");
+            _performanceMenuItem.Click += delegate { TogglePerformanceMode(); };
+            menu.Items.Add(_performanceMenuItem);
+
             _translucentMenuItem = new ToolStripMenuItem("半透明");
             _translucentMenuItem.Click += delegate { ToggleTranslucency(); };
             menu.Items.Add(_translucentMenuItem);
@@ -738,6 +778,7 @@ namespace PicoPaste
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出 PicoPaste", null, delegate { ExitApplication(); });
             menu.Opening += delegate { RefreshMenuChecks(); };
+            menu.Closed += delegate { BeginAutoHide(); };
             return menu;
         }
 
@@ -749,6 +790,7 @@ namespace PicoPaste
             menu.Items.Add("移到最前", null, delegate { MoveContextEntryToFront(); });
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("删除这条", null, delegate { DeleteContextEntry(); });
+            menu.Closed += delegate { BeginAutoHide(); };
             return menu;
         }
 
@@ -774,6 +816,7 @@ namespace PicoPaste
 
         private void HandleMouseMove(object sender, MouseEventArgs e)
         {
+            CancelAutoHide();
             if (_dragging)
             {
                 Point cursor = Cursor.Position;
@@ -798,7 +841,6 @@ namespace PicoPaste
 
             bool clickable = newHover >= 0 || HitControl(logical) != null;
             Cursor = _headerDragBounds.Contains(logical) ? Cursors.SizeAll : (clickable ? Cursors.Hand : Cursors.Default);
-            _outsideTicks = 0;
         }
 
         private void HandleMouseDown(object sender, MouseEventArgs e)
@@ -944,7 +986,7 @@ namespace PicoPaste
             _entries.RemoveAt(index);
             _entries.Insert(0, entry);
             _pageOffset = 0;
-            LocalStore.SaveHistory(_entries);
+            ScheduleHistorySave();
             SetStatus("已移到最前", Color.FromArgb(88, 122, 80));
             Invalidate();
         }
@@ -956,28 +998,33 @@ namespace PicoPaste
             if (object.ReferenceEquals(_copiedEntry, _contextEntry)) _copiedEntry = null;
             _entries.RemoveAt(index);
             ClampPageOffset();
-            LocalStore.SaveHistory(_entries);
+            ScheduleHistorySave();
             SetStatus("已删除", Color.FromArgb(126, 119, 108));
             Invalidate();
         }
 
-        private void HoverTimerTick(object sender, EventArgs e)
+        private void BeginAutoHide()
         {
             bool menuOpen = (_trayMenu != null && _trayMenu.Visible) || (_entryMenu != null && _entryMenu.Visible);
-            if (_animationTimer.Enabled || _dragging || menuOpen || _minimizedToTray) return;
+            if (!_expanded || _dragging || menuOpen || _minimizedToTray ||
+                _dockEdge == DockEdge.Floating || _preferences.Pinned) return;
+            _autoHideTimer.Stop();
+            _autoHideTimer.Start();
+        }
 
-            if (!_expanded)
-            {
-                if (Bounds.Contains(Cursor.Position)) ExpandOnCursorScreen(false);
-                return;
-            }
+        private void CancelAutoHide()
+        {
+            _autoHideTimer.Stop();
+        }
 
-            if (_dockEdge == DockEdge.Floating || _preferences.Pinned) return;
-
+        private void TryAutoHide()
+        {
+            bool menuOpen = (_trayMenu != null && _trayMenu.Visible) || (_entryMenu != null && _entryMenu.Visible);
+            if (!_expanded || _dragging || menuOpen || _minimizedToTray ||
+                _dockEdge == DockEdge.Floating || _preferences.Pinned) return;
             Rectangle safeArea = Bounds;
             safeArea.Inflate(7, 7);
-            if (safeArea.Contains(Cursor.Position)) _outsideTicks = 0;
-            else if (++_outsideTicks >= 7) Collapse();
+            if (!safeArea.Contains(Cursor.Position)) Collapse();
         }
 
         private void ToggleFromHotkey()
@@ -989,6 +1036,7 @@ namespace PicoPaste
 
         private void ExpandOnCursorScreen(bool activate)
         {
+            CancelAutoHide();
             Screen target = Screen.FromPoint(Cursor.Position);
             bool changedScreen = _screen == null || _screen.DeviceName != target.DeviceName;
             if (_dockEdge != DockEdge.Floating) _screen = target;
@@ -1006,7 +1054,6 @@ namespace PicoPaste
             if (_dockEdge == DockEdge.Floating)
             {
                 _expanded = true;
-                _outsideTicks = 0;
                 UpdateOpacity();
                 if (activate) { Activate(); BringToFront(); }
                 Invalidate();
@@ -1017,7 +1064,6 @@ namespace PicoPaste
             else SetVerticalPositionFromRatio();
 
             _expanded = true;
-            _outsideTicks = 0;
             AnimateTo(ExpandedLeft());
             UpdateOpacity();
             if (activate) { Activate(); BringToFront(); }
@@ -1026,6 +1072,7 @@ namespace PicoPaste
 
         private void Collapse()
         {
+            CancelAutoHide();
             if (_dockEdge == DockEdge.Floating)
             {
                 MinimizeToTray();
@@ -1042,6 +1089,7 @@ namespace PicoPaste
 
         private void MinimizeToTray()
         {
+            CancelAutoHide();
             _animationTimer.Stop();
             _minimizedToTray = true;
             _expanded = false;
@@ -1165,6 +1213,13 @@ namespace PicoPaste
 
         private void AnimateTo(int destinationLeft)
         {
+            if (_preferences.PerformanceMode)
+            {
+                _animationTimer.Stop();
+                Left = destinationLeft;
+                UpdateOpacity();
+                return;
+            }
             _animationFrom = Left;
             _animationTo = destinationLeft;
             _animationStarted = DateTime.UtcNow;
@@ -1188,7 +1243,7 @@ namespace PicoPaste
         private void UpdateOpacity()
         {
             if (_previewMode) return;
-            if (!_preferences.Translucent) Opacity = 1.0;
+            if (_preferences.PerformanceMode || !_preferences.Translucent) Opacity = 1.0;
             else if (!_expanded) Opacity = 0.78;
             else if (_dockEdge == DockEdge.Floating) Opacity = 0.97;
             else Opacity = 0.94;
@@ -1216,9 +1271,9 @@ namespace PicoPaste
 
                 _entries.RemoveAll(delegate(ClipEntry item) { return item.Text == text; });
                 _entries.Insert(0, new ClipEntry { Text = text, CreatedAt = DateTime.Now });
-                if (_entries.Count > MaxHistory) _entries.RemoveRange(MaxHistory, _entries.Count - MaxHistory);
+                TrimHistoryToLimits();
                 _pageOffset = 0;
-                LocalStore.SaveHistory(_entries);
+                ScheduleHistorySave();
                 Invalidate();
             }
             catch (ExternalException)
@@ -1266,6 +1321,8 @@ namespace PicoPaste
 
         private void ClearHistory()
         {
+            _saveTimer.Stop();
+            _historyDirty = false;
             _entries.Clear();
             _pageOffset = 0;
             _copiedEntry = null;
@@ -1273,6 +1330,51 @@ namespace PicoPaste
             _suppressClipboardText = null;
             LocalStore.ClearHistory();
             SetStatus("记录已清空", Color.FromArgb(126, 119, 108));
+        }
+
+        private bool TrimHistoryToLimits()
+        {
+            bool changed = _entries.RemoveAll(delegate(ClipEntry entry)
+            {
+                return entry == null || string.IsNullOrEmpty(entry.Text) || entry.Text.Length > MaxTextLength;
+            }) > 0;
+
+            if (_entries.Count > MaxHistory)
+            {
+                _entries.RemoveRange(MaxHistory, _entries.Count - MaxHistory);
+                changed = true;
+            }
+
+            long characters = 0;
+            int keep = 0;
+            while (keep < _entries.Count)
+            {
+                int length = _entries[keep].Text.Length;
+                if (keep > 0 && characters + length > MaxHistoryCharacters) break;
+                characters += length;
+                keep++;
+            }
+            if (keep < _entries.Count)
+            {
+                _entries.RemoveRange(keep, _entries.Count - keep);
+                changed = true;
+            }
+            return changed;
+        }
+
+        private void ScheduleHistorySave()
+        {
+            if (_previewMode) return;
+            _historyDirty = true;
+            _saveTimer.Stop();
+            _saveTimer.Start();
+        }
+
+        private void FlushHistorySave()
+        {
+            if (!_historyDirty || _previewMode) return;
+            LocalStore.SaveHistory(_entries);
+            _historyDirty = false;
         }
 
         private bool CanGoPrevious() { return _pageOffset > 0; }
@@ -1309,6 +1411,8 @@ namespace PicoPaste
         {
             _preferences.Pinned = !_preferences.Pinned;
             if (_preferences.Pinned && !_expanded) ExpandOnCursorScreen(false);
+            if (_preferences.Pinned) CancelAutoHide();
+            else BeginAutoHide();
             LocalStore.SavePreferences(_preferences);
             RefreshMenuChecks();
             SetStatus(_preferences.Pinned ? "已锁定展开" : "已恢复自动收起", Color.FromArgb(126, 119, 108));
@@ -1317,9 +1421,21 @@ namespace PicoPaste
         private void ToggleTranslucency()
         {
             _preferences.Translucent = !_preferences.Translucent;
+            if (_preferences.Translucent) _preferences.PerformanceMode = false;
             LocalStore.SavePreferences(_preferences);
             RefreshMenuChecks();
             UpdateOpacity();
+        }
+
+        private void TogglePerformanceMode()
+        {
+            _preferences.PerformanceMode = !_preferences.PerformanceMode;
+            if (_preferences.PerformanceMode) _preferences.Translucent = false;
+            LocalStore.SavePreferences(_preferences);
+            RefreshMenuChecks();
+            UpdateOpacity();
+            SetStatus(_preferences.PerformanceMode ? "极简性能模式已开启" : "平滑动画已开启",
+                Color.FromArgb(126, 119, 108));
         }
 
         private void ToggleTopMost()
@@ -1333,6 +1449,7 @@ namespace PicoPaste
         private void RefreshMenuChecks()
         {
             if (_pinMenuItem != null) _pinMenuItem.Checked = _preferences.Pinned;
+            if (_performanceMenuItem != null) _performanceMenuItem.Checked = _preferences.PerformanceMode;
             if (_translucentMenuItem != null) _translucentMenuItem.Checked = _preferences.Translucent;
             if (_topmostMenuItem != null) _topmostMenuItem.Checked = _preferences.AlwaysOnTop;
         }
@@ -1374,6 +1491,7 @@ namespace PicoPaste
         private void ExitApplication()
         {
             _exiting = true;
+            FlushHistorySave();
             LocalStore.SavePreferences(_preferences);
             Close();
         }
@@ -1388,6 +1506,8 @@ namespace PicoPaste
             }
 
             _exiting = true;
+            _saveTimer.Stop();
+            FlushHistorySave();
             if (_showEventRegistration != null) _showEventRegistration.Unregister(null);
             if (_trayIcon != null) _trayIcon.Visible = false;
             SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
@@ -1401,9 +1521,10 @@ namespace PicoPaste
                 if (_trayIcon != null) _trayIcon.Dispose();
                 if (_trayMenu != null) _trayMenu.Dispose();
                 if (_entryMenu != null) _entryMenu.Dispose();
-                if (_hoverTimer != null) _hoverTimer.Dispose();
+                if (_autoHideTimer != null) _autoHideTimer.Dispose();
                 if (_animationTimer != null) _animationTimer.Dispose();
                 if (_feedbackTimer != null) _feedbackTimer.Dispose();
+                if (_saveTimer != null) _saveTimer.Dispose();
             }
             base.Dispose(disposing);
         }
