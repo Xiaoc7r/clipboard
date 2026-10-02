@@ -16,8 +16,8 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: AssemblyTitle("PicoPaste")]
 [assembly: AssemblyDescription("A small edge-docked clipboard for Windows")]
 [assembly: AssemblyProduct("PicoPaste")]
-[assembly: AssemblyVersion("0.2.0.0")]
-[assembly: AssemblyFileVersion("0.2.0.0")]
+[assembly: AssemblyVersion("0.3.0.0")]
+[assembly: AssemblyFileVersion("0.3.0.0")]
 
 namespace PicoPaste
 {
@@ -213,6 +213,8 @@ namespace PicoPaste
         private const int MaxHistory = 40;
         private const int MaxTextLength = 131072;
         private const int MaxHistoryCharacters = 524288;
+        private const int PerformanceAnimationDuration = 95;
+        private const int SmoothAnimationDuration = 175;
         private const int SnapDistance = 58;
         private const int WmClipboardUpdate = 0x031D;
         private const int WmHotkey = 0x0312;
@@ -260,6 +262,7 @@ namespace PicoPaste
         private int _pageOffset;
         private int _animationFrom;
         private int _animationTo;
+        private int _animationDuration;
         private DateTime _animationStarted;
         private bool _expanded;
         private bool _dragging;
@@ -610,11 +613,14 @@ namespace PicoPaste
             Color ink, Color muted, Color border, Color accent)
         {
             bool hovered = slot == _hoveredCard;
+            bool pressed = slot == _pressedCard;
             bool copied = object.ReferenceEquals(entry, _copiedEntry);
             Color fill = copied ? Color.FromArgb(235, 245, 233) :
-                (hovered ? Color.FromArgb(255, 247, 240) : Color.FromArgb(255, 253, 249));
+                (pressed ? Color.FromArgb(247, 235, 225) :
+                (hovered ? Color.FromArgb(255, 247, 240) : Color.FromArgb(255, 253, 249)));
             Color line = copied ? Color.FromArgb(155, 190, 148) :
-                (hovered ? Color.FromArgb(228, 171, 143) : border);
+                (pressed ? Color.FromArgb(207, 128, 92) :
+                (hovered ? Color.FromArgb(228, 171, 143) : border));
 
             using (GraphicsPath path = RoundedRectangle(bounds, 10))
             using (SolidBrush brush = new SolidBrush(fill))
@@ -1213,22 +1219,22 @@ namespace PicoPaste
 
         private void AnimateTo(int destinationLeft)
         {
-            if (_preferences.PerformanceMode)
+            if (Left == destinationLeft)
             {
                 _animationTimer.Stop();
-                Left = destinationLeft;
                 UpdateOpacity();
                 return;
             }
             _animationFrom = Left;
             _animationTo = destinationLeft;
+            _animationDuration = _preferences.PerformanceMode ? PerformanceAnimationDuration : SmoothAnimationDuration;
             _animationStarted = DateTime.UtcNow;
             _animationTimer.Start();
         }
 
         private void AnimationTimerTick(object sender, EventArgs e)
         {
-            double t = (DateTime.UtcNow - _animationStarted).TotalMilliseconds / 175.0;
+            double t = (DateTime.UtcNow - _animationStarted).TotalMilliseconds / _animationDuration;
             if (t >= 1.0)
             {
                 Left = _animationTo;
@@ -1434,7 +1440,7 @@ namespace PicoPaste
             LocalStore.SavePreferences(_preferences);
             RefreshMenuChecks();
             UpdateOpacity();
-            SetStatus(_preferences.PerformanceMode ? "极简性能模式已开启" : "平滑动画已开启",
+            SetStatus(_preferences.PerformanceMode ? "低功耗动效已开启" : "平滑动画已开启",
                 Color.FromArgb(126, 119, 108));
         }
 
