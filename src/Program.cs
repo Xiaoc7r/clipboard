@@ -16,8 +16,8 @@ using Timer = System.Windows.Forms.Timer;
 [assembly: AssemblyTitle("PicoPaste")]
 [assembly: AssemblyDescription("A small edge-docked clipboard for Windows")]
 [assembly: AssemblyProduct("PicoPaste")]
-[assembly: AssemblyVersion("0.3.0.0")]
-[assembly: AssemblyFileVersion("0.3.0.0")]
+[assembly: AssemblyVersion("0.4.0.0")]
+[assembly: AssemblyFileVersion("0.4.0.0")]
 
 namespace PicoPaste
 {
@@ -98,10 +98,10 @@ namespace PicoPaste
         {
             return new UserPreferences
             {
-                SettingsVersion = 2,
+                SettingsVersion = 3,
                 DockSide = "Right",
                 TopRatio = 0.5,
-                Translucent = false,
+                Translucent = true,
                 Pinned = false,
                 AlwaysOnTop = true,
                 PerformanceMode = true
@@ -149,6 +149,13 @@ namespace PicoPaste
                 preferences.SettingsVersion = 2;
                 preferences.PerformanceMode = true;
                 preferences.Translucent = false;
+                migrated = true;
+            }
+            if (preferences.SettingsVersion < 3)
+            {
+                preferences.SettingsVersion = 3;
+                preferences.DockSide = "Right";
+                preferences.Translucent = true;
                 migrated = true;
             }
             if (preferences.DockSide != "Left" && preferences.DockSide != "Right")
@@ -220,7 +227,7 @@ namespace PicoPaste
         private const int WmHotkey = 0x0312;
         private const int WmDpiChanged = 0x02E0;
         private const int HotkeyId = 0x5043;
-        private const uint ModAlt = 0x0001;
+        private const uint ModShift = 0x0004;
         private const uint ModNoRepeat = 0x4000;
 
         private readonly bool _previewMode;
@@ -343,7 +350,7 @@ namespace PicoPaste
                 _entryMenu = BuildEntryMenu();
                 _trayIcon = new NotifyIcon();
                 _trayIcon.Icon = CreateTrayIcon();
-                _trayIcon.Text = "PicoPaste · Alt+V 呼出";
+                _trayIcon.Text = "PicoPaste · 移到屏幕边缘呼出";
                 _trayIcon.ContextMenuStrip = _trayMenu;
                 _trayIcon.Visible = true;
                 _trayIcon.DoubleClick += delegate { ExpandOnCursorScreen(true); };
@@ -386,9 +393,9 @@ namespace PicoPaste
             entries.Add(new ClipEntry { Text = "拖动顶部，可以把窗口移到任意位置。", CreatedAt = DateTime.Now });
             entries.Add(new ClipEntry { Text = "靠近左右屏幕边缘时会自动吸附。", CreatedAt = DateTime.Now.AddMinutes(-3) });
             entries.Add(new ClipEntry { Text = "滚轮可以继续浏览更早的复制记录。", CreatedAt = DateTime.Now.AddMinutes(-18) });
-            entries.Add(new ClipEntry { Text = "按数字 1 到 4，直接复制当前四条。", CreatedAt = DateTime.Now.AddHours(-2) });
+            entries.Add(new ClipEntry { Text = "移动鼠标到屏幕边缘即可自然滑出。", CreatedAt = DateTime.Now.AddHours(-2) });
             entries.Add(new ClipEntry { Text = "右键卡片可以置顶或者删除这一条。", CreatedAt = DateTime.Now.AddHours(-5) });
-            entries.Add(new ClipEntry { Text = "Alt + V 可以快速呼出或收起。", CreatedAt = DateTime.Now.AddDays(-1) });
+            entries.Add(new ClipEntry { Text = "Shift + P 也可以快速呼出或收起。", CreatedAt = DateTime.Now.AddDays(-1) });
             return entries;
         }
 
@@ -420,8 +427,8 @@ namespace PicoPaste
             ApplyDpiScale();
             if (_previewMode) return;
             _clipboardListenerAttached = AddClipboardFormatListener(Handle);
-            _hotkeyAttached = RegisterHotKey(Handle, HotkeyId, ModAlt | ModNoRepeat, (uint)Keys.V);
-            if (!_hotkeyAttached) SetStatus("Alt+V 已被其他程序占用", Color.FromArgb(176, 92, 68));
+            _hotkeyAttached = RegisterHotKey(Handle, HotkeyId, ModShift | ModNoRepeat, (uint)Keys.P);
+            if (!_hotkeyAttached) SetStatus("Shift+P 已被其他程序占用", Color.FromArgb(176, 92, 68));
         }
 
         protected override void OnHandleDestroyed(EventArgs e)
@@ -705,7 +712,7 @@ namespace PicoPaste
 
             using (Font hintFont = ScaledFont("Microsoft YaHei UI", 7.1f, FontStyle.Regular))
             using (SolidBrush hintBrush = new SolidBrush(muted))
-                g.DrawString("滚轮浏览 · 1-4 复制", hintFont, hintBrush, 145, 334);
+                g.DrawString("鼠标悬停 · 点击复制", hintFont, hintBrush, 145, 334);
             using (SolidBrush dot = new SolidBrush(accent)) g.FillEllipse(dot, 137, 339, 3, 3);
         }
 
@@ -930,14 +937,6 @@ namespace PicoPaste
                 return;
             }
 
-            int slot = -1;
-            if (e.KeyCode >= Keys.D1 && e.KeyCode <= Keys.D4) slot = e.KeyCode - Keys.D1;
-            else if (e.KeyCode >= Keys.NumPad1 && e.KeyCode <= Keys.NumPad4) slot = e.KeyCode - Keys.NumPad1;
-            if (slot >= 0)
-            {
-                CopyEntryAt(_pageOffset + slot, 0);
-                e.Handled = true;
-            }
         }
 
         private string HitControl(Point logical)
@@ -1055,7 +1054,7 @@ namespace PicoPaste
                 _minimizedToTray = false;
             }
 
-            if (_trayIcon != null) _trayIcon.Text = "PicoPaste · Alt+V 呼出";
+            if (_trayIcon != null) _trayIcon.Text = "PicoPaste · 移到屏幕边缘呼出";
 
             if (_dockEdge == DockEdge.Floating)
             {
@@ -1100,7 +1099,7 @@ namespace PicoPaste
             _minimizedToTray = true;
             _expanded = false;
             Hide();
-            if (_trayIcon != null) _trayIcon.Text = "PicoPaste · 已最小化 · Alt+V 呼出";
+            if (_trayIcon != null) _trayIcon.Text = "PicoPaste · 已最小化 · Shift+P 呼出";
         }
 
         private void FinishDrag()
@@ -1249,10 +1248,10 @@ namespace PicoPaste
         private void UpdateOpacity()
         {
             if (_previewMode) return;
-            if (_preferences.PerformanceMode || !_preferences.Translucent) Opacity = 1.0;
-            else if (!_expanded) Opacity = 0.78;
+            if (!_preferences.Translucent) Opacity = 1.0;
+            else if (!_expanded) Opacity = 0.86;
             else if (_dockEdge == DockEdge.Floating) Opacity = 0.97;
-            else Opacity = 0.94;
+            else Opacity = 0.95;
         }
 
         private void CaptureClipboard(int attempt)
@@ -1427,7 +1426,6 @@ namespace PicoPaste
         private void ToggleTranslucency()
         {
             _preferences.Translucent = !_preferences.Translucent;
-            if (_preferences.Translucent) _preferences.PerformanceMode = false;
             LocalStore.SavePreferences(_preferences);
             RefreshMenuChecks();
             UpdateOpacity();
@@ -1436,7 +1434,6 @@ namespace PicoPaste
         private void TogglePerformanceMode()
         {
             _preferences.PerformanceMode = !_preferences.PerformanceMode;
-            if (_preferences.PerformanceMode) _preferences.Translucent = false;
             LocalStore.SavePreferences(_preferences);
             RefreshMenuChecks();
             UpdateOpacity();
