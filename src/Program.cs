@@ -128,9 +128,9 @@ namespace PicoPaste
             return entries ?? new List<ClipEntry>();
         }
 
-        public static void SaveHistory(List<ClipEntry> entries)
+        public static bool SaveHistory(List<ClipEntry> entries)
         {
-            WriteJson(HistoryFile, entries);
+            return WriteJson(HistoryFile, entries);
         }
 
         public static void ClearHistory()
@@ -185,7 +185,7 @@ namespace PicoPaste
             catch { return null; }
         }
 
-        private static void WriteJson<T>(string path, T value)
+        private static bool WriteJson<T>(string path, T value)
         {
             try
             {
@@ -195,12 +195,14 @@ namespace PicoPaste
                 {
                     DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(T));
                     serializer.WriteObject(stream, value);
-                    stream.Flush();
+                    stream.Flush(true);
                 }
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(temp, path);
+                // Keep the previous snapshot until the replacement is complete.
+                if (File.Exists(path)) File.Replace(temp, path, null);
+                else File.Move(temp, path);
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
     }
 
@@ -1372,14 +1374,21 @@ namespace PicoPaste
             if (_previewMode) return;
             _historyDirty = true;
             _saveTimer.Stop();
+            _saveTimer.Interval = 400;
             _saveTimer.Start();
         }
 
         private void FlushHistorySave()
         {
             if (!_historyDirty || _previewMode) return;
-            LocalStore.SaveHistory(_entries);
-            _historyDirty = false;
+            if (LocalStore.SaveHistory(_entries))
+                _historyDirty = false;
+            else if (!_exiting)
+            {
+                // A transient file lock must not silently discard the pending save.
+                _saveTimer.Interval = 5000;
+                _saveTimer.Start();
+            }
         }
 
         private bool CanGoPrevious() { return _pageOffset > 0; }
